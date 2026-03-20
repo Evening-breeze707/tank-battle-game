@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>坦克大战小游戏</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="container">
+      <div class="panel">
+        <h1>坦克大战</h1>
+        <div class="info">
+          <p>关卡：<span id="stage">1-1</span></p>
+          <p>分数：<span id="score">0</span></p>
+          <p>生命：<span id="lives">3</span></p>
+          <p>敌人：<span id="enemies">0</span></p>
+        </div>
+        <div class="tips">
+          <p>操作：WASD/方向键移动，空格发射</p>
+          <p id="status">按下“开始游戏”</p>
+        </div>
+        <button id="startBtn">开始游戏</button>
+      </div>
+      <canvas id="game" width="800" height="520"></canvas>
+    </div>
+
+    <script src="./game.js"></script>
+  </body>
+</html>
