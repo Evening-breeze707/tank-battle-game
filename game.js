@@ -7,6 +7,12 @@ const livesEl = document.getElementById('lives');
 const enemiesEl = document.getElementById('enemies');
 const statusEl = document.getElementById('status');
 const startBtn = document.getElementById('startBtn');
+const registerBtn = document.getElementById('registerBtn');
+const loginBtn = document.getElementById('loginBtn');
+const logoutBtn = document.getElementById('logoutBtn');
+const userNameEl = document.getElementById('userName');
+const leaderboardListEl = document.getElementById('leaderboardList');
+const mobileControls = document.querySelector('.mobile-controls');
 
 const keys = new Set();
 const keyMap = {
@@ -19,6 +25,107 @@ const keyMap = {
   ArrowRight: 'right',
   KeyD: 'right',
 };
+
+const API_BASE = '/.netlify/functions';
+let authToken = localStorage.getItem('tank_token') || '';
+let authUser = null;
+
+async function apiFetch(path, options = {}) {
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+  if (authToken) headers.Authorization = `Bearer ${authToken}`;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+  try {
+    const res = await fetch(`${API_BASE}/${path}`, { ...options, headers, signal: controller.signal });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || '请求失败');
+    return data;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function updateAuthUI() {
+  userNameEl.textContent = authUser?.nickname || '未登录';
+}
+
+async function refreshLeaderboard() {
+  try {
+    const data = await apiFetch('leaderboard');
+    const list = data.items || [];
+    leaderboardListEl.innerHTML = list.length
+      ? list.map((item) => `<li>${item.nickname}：${item.best_score} 分</li>`).join('')
+      : '<li>暂无数据</li>';
+  } catch {
+    leaderboardListEl.innerHTML = '<li>排行榜加载失败</li>';
+  }
+}
+
+async function loadProfile() {
+  if (!authToken) return;
+
+  try {
+    const me = await apiFetch('auth-me');
+    authUser = me.user;
+    updateAuthUI();
+
+    const profileData = await apiFetch('profile-get');
+    const p = profileData.profile;
+    if (p && game) {
+      game.score = Number(p.score || 0);
+      game.lives = Number(p.lives || 3);
+      game.levelIndex = Math.max(0, Math.min(LEVELS.length - 1, Number(p.level || 1) - 1));
+      loadLevel(game.levelIndex, true);
+      syncPanel();
+      setStatus('已读取云存档');
+    }
+  } catch (err) {
+    const msg = String(err?.message || '');
+    if (msg.includes('未登录') || msg.includes('过期') || msg.includes('权限')) {
+      authToken = '';
+      authUser = null;
+      localStorage.removeItem('tank_token');
+      updateAuthUI();
+    }
+  }
+}
+
+async function saveProfile() {
+  if (!authToken || !game) return;
+
+  try {
+    await apiFetch('profile-save', {
+      method: 'POST',
+      body: JSON.stringify({
+        level: game.levelIndex + 1,
+        score: game.score,
+        lives: game.lives,
+      }),
+    });
+  } catch {
+    // ignore
+  }
+}
+
+async function submitScore() {
+  if (!authToken || !game) return;
+
+  try {
+    await apiFetch('score-submit', {
+      method: 'POST',
+      body: JSON.stringify({
+        score: game.score,
+        stage: stageText(),
+        duration_sec: 0,
+      }),
+    });
+    await refreshLeaderboard();
+  } catch {
+    // ignore
+  }
+}
 
 const STATE = {
   ready: 'ready',
@@ -219,6 +326,8 @@ function startGame() {
 function endGame(win) {
   game.state = STATE.over;
   setStatus(win ? '最终胜利！点击“开始游戏”再战' : '失败！点击“开始游戏”重来', win ? '#7ce38b' : '#ff8d8d');
+  saveProfile();
+  submitScore();
 }
 
 function fireBullet(fromTank) {
@@ -752,5 +861,120 @@ startBtn.addEventListener('click', () => {
   startGame();
 });
 
+function setAuthActionLoading(loading, text = '') {
+  registerBtn.disabled = loading;
+  loginBtn.disabled = loading;
+  registerBtn.textContent = loading && text === 'register' ? '注册中...' : '注册';
+  loginBtn.textContent = loading && text === 'login' ? '登录中...' : '登录';
+}
+
+async function loginWithCredentials(email, password) {
+  const data = await apiFetch('auth-login', {
+    method: 'POST',
+    body: JSON.stringify({ email, password }),
+  });
+
+  authToken = data.token;
+  authUser = data.user;
+  localStorage.setItem('tank_token', authToken);
+  updateAuthUI();
+  setStatus(`欢迎回来，${authUser.nickname}`);
+
+  loadProfile();
+  refreshLeaderboard();
+}
+
+registerBtn.addEventListener('click', async () => {
+  const email = window.prompt('请输入邮箱：');
+  const nickname = window.prompt('请输入昵称：');
+  const password = window.prompt('请输入密码（至少6位）：');
+  if (!email || !nickname || !password) return;
+
+  setAuthActionLoading(true, 'register');
+  setStatus('正在注册并自动登录...', '#ffe08a');
+
+  try {
+    await apiFetch('auth-register', {
+      method: 'POST',
+      body: JSON.stringify({ email, nickname, password }),
+    });
+    await loginWithCredentials(email, password);
+    setStatus(`注册成功，已自动登录：${nickname}`, '#9cf3ab');
+  } catch (err) {
+    setStatus(`注册失败：${err.message}`, '#ff9d9d');
+  } finally {
+    setAuthActionLoading(false);
+  }
+});
+
+loginBtn.addEventListener('click', async () => {
+  const email = window.prompt('邮箱：');
+  const password = window.prompt('密码：');
+  if (!email || !password) return;
+
+  setAuthActionLoading(true, 'login');
+  setStatus('正在登录...', '#ffe08a');
+
+  try {
+    await loginWithCredentials(email, password);
+  } catch (err) {
+    setStatus(`登录失败：${err.message}`, '#ff9d9d');
+  } finally {
+    setAuthActionLoading(false);
+  }
+});
+
+logoutBtn.addEventListener('click', () => {
+  authToken = '';
+  authUser = null;
+  localStorage.removeItem('tank_token');
+  updateAuthUI();
+  setStatus('已退出登录', '#ffe08a');
+});
+
+function bindMobileControls() {
+  if (!mobileControls) return;
+
+  const directionButtons = mobileControls.querySelectorAll('[data-key]');
+  directionButtons.forEach((btn) => {
+    const dir = btn.dataset.key;
+    if (!dir) return;
+
+    const press = (e) => {
+      e.preventDefault();
+      keys.add(dir);
+    };
+
+    const release = (e) => {
+      e.preventDefault();
+      keys.delete(dir);
+    };
+
+    btn.addEventListener('pointerdown', press);
+    btn.addEventListener('pointerup', release);
+    btn.addEventListener('pointercancel', release);
+    btn.addEventListener('pointerleave', release);
+  });
+
+  const fireBtn = mobileControls.querySelector('[data-action="fire"]');
+  if (fireBtn) {
+    fireBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      if (game && game.state === STATE.running) fireBullet(game.player);
+    });
+  }
+}
+
+bindMobileControls();
 resetGame();
+updateAuthUI();
+setStatus('正在连接服务...', '#ffe08a');
+Promise.all([refreshLeaderboard(), loadProfile()])
+  .then(() => {
+    if (authUser) setStatus(`欢迎回来，${authUser.nickname}`);
+    else setStatus('按下“开始游戏”');
+  })
+  .catch(() => {
+    setStatus('服务连接异常，请稍后重试', '#ff9d9d');
+  });
 requestAnimationFrame(loop);

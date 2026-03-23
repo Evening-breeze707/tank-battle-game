@@ -20,9 +20,36 @@
           <p>操作：WASD/方向键移动，空格发射</p>
           <p id="status">按下“开始游戏”</p>
         </div>
+
+        <div class="auth-box">
+          <p>账号：<span id="userName">未登录</span></p>
+          <div class="auth-actions">
+            <button id="registerBtn" class="mini-btn">注册</button>
+            <button id="loginBtn" class="mini-btn">登录</button>
+            <button id="logoutBtn" class="mini-btn danger">退出</button>
+          </div>
+        </div>
+
         <button id="startBtn">开始游戏</button>
+
+        <div class="leaderboard">
+          <h3>全服排行榜</h3>
+          <ol id="leaderboardList"></ol>
+        </div>
       </div>
       <canvas id="game" width="800" height="520"></canvas>
+    </div>
+
+    <div class="mobile-controls" aria-label="手机操作按钮">
+      <div class="dpad">
+        <button class="ctrl-btn" data-key="up" aria-label="上">↑</button>
+        <div class="dpad-mid">
+          <button class="ctrl-btn" data-key="left" aria-label="左">←</button>
+          <button class="ctrl-btn" data-key="down" aria-label="下">↓</button>
+          <button class="ctrl-btn" data-key="right" aria-label="右">→</button>
+        </div>
+      </div>
+      <button class="ctrl-btn fire-btn" data-action="fire" aria-label="发射">开火</button>
     </div>
 
     <script src="./game.js"></script>
