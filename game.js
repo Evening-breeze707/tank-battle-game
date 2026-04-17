@@ -15,6 +15,7 @@ const leaderboardListEl = document.getElementById('leaderboardList');
 const mobileControls = document.querySelector('.mobile-controls');
 
 const keys = new Set();
+const directionStack = [];
 const keyMap = {
   ArrowUp: 'up',
   KeyW: 'up',
@@ -25,6 +26,33 @@ const keyMap = {
   ArrowRight: 'right',
   KeyD: 'right',
 };
+
+function pressDirection(dir) {
+  if (!dir) return;
+  keys.add(dir);
+
+  const existingIndex = directionStack.indexOf(dir);
+  if (existingIndex >= 0) directionStack.splice(existingIndex, 1);
+  directionStack.push(dir);
+}
+
+function releaseDirection(dir) {
+  if (!dir) return;
+  keys.delete(dir);
+
+  const existingIndex = directionStack.indexOf(dir);
+  if (existingIndex >= 0) directionStack.splice(existingIndex, 1);
+}
+
+function getActiveDirection() {
+  while (directionStack.length > 0) {
+    const dir = directionStack[directionStack.length - 1];
+    if (keys.has(dir)) return dir;
+    directionStack.pop();
+  }
+
+  return '';
+}
 
 const API_BASE = '/.netlify/functions';
 let authToken = localStorage.getItem('tank_token') || '';
@@ -134,6 +162,7 @@ const STATE = {
 };
 
 const MAX_LIVES = 5;
+const GRASS_SLOW_FACTOR = 0.58;
 
 const LEVELS = [
   {
@@ -188,17 +217,22 @@ function createTank(x, y, color, isPlayer = false, overrides = {}) {
 
 function createLevelMap1() {
   const blocks = [];
+  const terrainTiles = [];
   addLineBlocks(blocks, 120, 200, 640, 40, (x) => (x % 80 === 0 ? 'steel' : 'brick'));
   addLineBlocks(blocks, 80, 320, 680, 40, (x) => (x % 120 === 0 ? 'steel' : 'brick'), [360, 400]);
   for (let y = 80; y <= 360; y += 40) {
     blocks.push(createBlock(40, y, 'steel'));
     blocks.push(createBlock(720, y, 'steel'));
   }
-  return blocks;
+  addTerrainRect(terrainTiles, 120, 80, 240, 160, 'grass', 'l1-grass-left');
+  addTerrainRect(terrainTiles, 560, 80, 680, 160, 'grass', 'l1-grass-right');
+  addTerrainRect(terrainTiles, 320, 360, 440, 440, 'grass', 'l1-grass-bottom');
+  return { blocks, terrainTiles };
 }
 
 function createLevelMap2() {
   const blocks = [];
+  const terrainTiles = [];
   for (let y = 120; y <= 360; y += 40) {
     blocks.push(createBlock(200, y, y === 240 ? 'steel' : 'brick'));
     blocks.push(createBlock(560, y, y === 240 ? 'steel' : 'brick'));
@@ -206,11 +240,15 @@ function createLevelMap2() {
   addLineBlocks(blocks, 280, 120, 480, 40, () => 'steel');
   addLineBlocks(blocks, 280, 360, 480, 40, (x) => (x === 360 || x === 400 ? 'steel' : 'brick'));
   addLineBlocks(blocks, 80, 260, 680, 40, (x) => (x % 160 === 0 ? 'steel' : 'brick'), [360, 400]);
-  return blocks;
+  addTerrainRect(terrainTiles, 80, 120, 160, 240, 'grass', 'l2-grass-left');
+  addTerrainRect(terrainTiles, 640, 120, 720, 240, 'grass', 'l2-grass-right');
+  addTerrainRect(terrainTiles, 320, 400, 480, 440, 'grass', 'l2-grass-bottom');
+  return { blocks, terrainTiles };
 }
 
 function createBossMap() {
   const blocks = [];
+  const terrainTiles = [];
   addLineBlocks(blocks, 80, 180, 680, 40, (x) => (x % 120 === 0 ? 'steel' : 'brick'));
   addLineBlocks(blocks, 80, 300, 680, 40, (x) => (x % 120 === 40 ? 'steel' : 'brick'));
   for (let y = 80; y <= 360; y += 40) {
@@ -218,17 +256,33 @@ function createBossMap() {
     blocks.push(createBlock(360, y, y % 80 === 0 ? 'steel' : 'brick'));
     blocks.push(createBlock(400, y, y % 80 === 0 ? 'steel' : 'brick'));
   }
-  return blocks;
+  addTerrainRect(terrainTiles, 120, 80, 240, 120, 'grass', 'boss-grass-top-left');
+  addTerrainRect(terrainTiles, 560, 80, 680, 120, 'grass', 'boss-grass-top-right');
+  addTerrainRect(terrainTiles, 120, 360, 240, 440, 'grass', 'boss-grass-bottom-left');
+  addTerrainRect(terrainTiles, 560, 360, 680, 440, 'grass', 'boss-grass-bottom-right');
+  return { blocks, terrainTiles };
 }
 
 function createBlock(x, y, type) {
   return { x, y, width: 40, height: 40, type, hp: type === 'brick' ? 2 : 999 };
 }
 
+function createTerrain(x, y, type, patchId = '') {
+  return { x, y, width: 40, height: 40, type, patchId };
+}
+
 function addLineBlocks(blocks, fromX, y, toX, step, typeGetter, skipXs = []) {
   for (let x = fromX; x <= toX; x += step) {
     if (skipXs.includes(x)) continue;
     blocks.push(createBlock(x, y, typeGetter(x)));
+  }
+}
+
+function addTerrainRect(terrainTiles, fromX, fromY, toX, toY, type, patchId = '') {
+  for (let y = fromY; y <= toY; y += 40) {
+    for (let x = fromX; x <= toX; x += 40) {
+      terrainTiles.push(createTerrain(x, y, type, patchId));
+    }
   }
 }
 
@@ -260,6 +314,7 @@ function resetGame() {
     rapidFireTimer: 0,
     level: LEVELS[0],
     mapBlocks: [],
+    terrainTiles: [],
   };
 
   loadLevel(0, true);
@@ -277,7 +332,9 @@ function loadLevel(levelIndex, initial = false) {
   game.enemies = [];
   game.bullets = [];
   game.pickups = [];
-  game.mapBlocks = game.level.map();
+  const levelData = game.level.map();
+  game.mapBlocks = levelData.blocks || levelData;
+  game.terrainTiles = levelData.terrainTiles || [];
 
   game.player.x = canvas.width / 2 - game.player.width / 2;
   game.player.y = canvas.height - 60;
@@ -365,6 +422,38 @@ function tankBlocked(tank) {
   return game.mapBlocks.some((block) => intersects(tank, block));
 }
 
+function tankCenterPoint(tank) {
+  return {
+    x: tank.x + tank.width / 2,
+    y: tank.y + tank.height / 2,
+  };
+}
+
+function isTankInTerrain(tank, type) {
+  const point = tankCenterPoint(tank);
+  return game.terrainTiles.some((tile) => tile.type === type && rectHitPoint(tile, point.x, point.y));
+}
+
+function getTankTerrainPatchId(tank, type) {
+  const point = tankCenterPoint(tank);
+  const tile = game.terrainTiles.find((entry) => entry.type === type && rectHitPoint(entry, point.x, point.y));
+  return tile?.patchId || '';
+}
+
+function isTankInGrass(tank) {
+  return isTankInTerrain(tank, 'grass');
+}
+
+function isSameGrassPatch(tankA, tankB) {
+  const patchA = getTankTerrainPatchId(tankA, 'grass');
+  if (!patchA) return false;
+  return patchA === getTankTerrainPatchId(tankB, 'grass');
+}
+
+function getTankMoveSpeed(tank) {
+  return tank.speed * (isTankInGrass(tank) ? GRASS_SLOW_FACTOR : 1);
+}
+
 function moveTankWithCollision(tank, dx, dy) {
   const oldX = tank.x;
   const oldY = tank.y;
@@ -380,28 +469,26 @@ function moveTankWithCollision(tank, dx, dy) {
 
 function updatePlayer(dt) {
   const p = game.player;
+  const activeDir = getActiveDirection();
   let vx = 0;
   let vy = 0;
 
-  if (keys.has('up')) {
-    vy -= 1;
+  if (activeDir === 'up') {
+    vy = -1;
     p.dir = 'up';
-  }
-  if (keys.has('down')) {
-    vy += 1;
+  } else if (activeDir === 'down') {
+    vy = 1;
     p.dir = 'down';
-  }
-  if (keys.has('left')) {
-    vx -= 1;
+  } else if (activeDir === 'left') {
+    vx = -1;
     p.dir = 'left';
-  }
-  if (keys.has('right')) {
-    vx += 1;
+  } else if (activeDir === 'right') {
+    vx = 1;
     p.dir = 'right';
   }
 
-  const len = Math.hypot(vx, vy) || 1;
-  moveTankWithCollision(p, (vx / len) * p.speed * dt, (vy / len) * p.speed * dt);
+  const moveSpeed = getTankMoveSpeed(p);
+  moveTankWithCollision(p, vx * moveSpeed * dt, vy * moveSpeed * dt);
 
   p.shotCooldown = Math.max(0, p.shotCooldown - dt);
 }
@@ -411,6 +498,23 @@ function chooseRandomDir() {
   return dirs[Math.floor(Math.random() * dirs.length)];
 }
 
+function chooseEnemyDir(enemy) {
+  if (isTankInGrass(game.player) && !isSameGrassPatch(enemy, game.player)) return chooseRandomDir();
+
+  const dx = game.player.x - enemy.x;
+  const dy = game.player.y - enemy.y;
+  const distance = Math.hypot(dx, dy);
+  const chaseRange = enemy.isBoss ? 420 : 280;
+
+  if (distance >= chaseRange) return chooseRandomDir();
+
+  if (Math.abs(dx) > Math.abs(dy)) {
+    return dx > 0 ? 'right' : 'left';
+  }
+
+  return dy > 0 ? 'down' : 'up';
+}
+
 function updateEnemyAI(enemy, dt) {
   enemy.speed = enemy.isBoss ? game.level.boss.speed : game.level.enemySpeed;
   enemy.shotCooldown = Math.max(0, enemy.shotCooldown - dt);
@@ -418,17 +522,8 @@ function updateEnemyAI(enemy, dt) {
   enemy.aiShootTimer -= dt;
 
   if (enemy.aiTurnTimer <= 0) {
-    enemy.dir = chooseRandomDir();
+    enemy.dir = chooseEnemyDir(enemy);
     enemy.aiTurnTimer = enemy.isBoss ? 0.5 + Math.random() * 0.8 : 0.7 + Math.random() * 1.4;
-  }
-
-  const dx = game.player.x - enemy.x;
-  const dy = game.player.y - enemy.y;
-  const distance = Math.hypot(dx, dy);
-
-  if (distance < (enemy.isBoss ? 420 : 280)) {
-    if (Math.abs(dx) > Math.abs(dy)) enemy.dir = dx > 0 ? 'right' : 'left';
-    else enemy.dir = dy > 0 ? 'down' : 'up';
   }
 
   let vx = 0;
@@ -438,10 +533,14 @@ function updateEnemyAI(enemy, dt) {
   if (enemy.dir === 'left') vx = -1;
   if (enemy.dir === 'right') vx = 1;
 
+  const moveSpeed = getTankMoveSpeed(enemy);
   const oldX = enemy.x;
   const oldY = enemy.y;
-  moveTankWithCollision(enemy, vx * enemy.speed * dt, vy * enemy.speed * dt);
-  if (enemy.x === oldX && enemy.y === oldY) enemy.dir = chooseRandomDir();
+  moveTankWithCollision(enemy, vx * moveSpeed * dt, vy * moveSpeed * dt);
+  if (enemy.x === oldX && enemy.y === oldY) {
+    enemy.dir = chooseEnemyDir(enemy);
+    enemy.aiTurnTimer = 0.2;
+  }
 
   if (enemy.aiShootTimer <= 0) {
     fireBullet(enemy);
@@ -728,6 +827,29 @@ function drawBlocks() {
   }
 }
 
+function drawTerrain(overlay = false) {
+  for (const tile of game.terrainTiles) {
+    if (tile.type !== 'grass') continue;
+
+    if (!overlay) {
+      ctx.fillStyle = '#2f6f3f';
+      ctx.fillRect(tile.x + 1, tile.y + 1, tile.width - 2, tile.height - 2);
+      ctx.fillStyle = 'rgba(137, 214, 119, 0.3)';
+      ctx.fillRect(tile.x + 6, tile.y + 4, 10, 12);
+      ctx.fillRect(tile.x + 18, tile.y + 10, 12, 14);
+      ctx.fillRect(tile.x + 28, tile.y + 6, 8, 16);
+      continue;
+    }
+
+    ctx.fillStyle = 'rgba(74, 143, 73, 0.6)';
+    ctx.fillRect(tile.x, tile.y, tile.width, tile.height);
+    ctx.fillStyle = 'rgba(174, 233, 137, 0.38)';
+    ctx.fillRect(tile.x + 4, tile.y + 4, 8, 28);
+    ctx.fillRect(tile.x + 16, tile.y + 8, 8, 24);
+    ctx.fillRect(tile.x + 28, tile.y + 5, 7, 26);
+  }
+}
+
 function drawPickups() {
   for (const p of game.pickups) {
     const lifeAlpha = Math.max(0.2, Math.min(1, p.life / 10));
@@ -781,12 +903,17 @@ function draw() {
   drawGrid();
   if (!game) return;
 
+  drawTerrain();
   drawBlocks();
   drawPickups();
 
   drawTank(game.player);
-  for (const enemy of game.enemies) drawTank(enemy);
+  for (const enemy of game.enemies) {
+    if (isTankInGrass(enemy) && !isSameGrassPatch(enemy, game.player)) continue;
+    drawTank(enemy);
+  }
   drawPlayerShield();
+  drawTerrain(true);
 
   ctx.fillStyle = '#ffd166';
   for (const bullet of game.bullets) {
@@ -838,7 +965,7 @@ function loop(timestamp) {
 
 window.addEventListener('keydown', (e) => {
   if (e.code in keyMap) {
-    keys.add(keyMap[e.code]);
+    pressDirection(keyMap[e.code]);
     e.preventDefault();
     return;
   }
@@ -851,9 +978,14 @@ window.addEventListener('keydown', (e) => {
 
 window.addEventListener('keyup', (e) => {
   if (e.code in keyMap) {
-    keys.delete(keyMap[e.code]);
+    releaseDirection(keyMap[e.code]);
     e.preventDefault();
   }
+});
+
+window.addEventListener('blur', () => {
+  keys.clear();
+  directionStack.length = 0;
 });
 
 startBtn.addEventListener('click', () => {
@@ -942,12 +1074,12 @@ function bindMobileControls() {
 
     const press = (e) => {
       e.preventDefault();
-      keys.add(dir);
+      pressDirection(dir);
     };
 
     const release = (e) => {
       e.preventDefault();
-      keys.delete(dir);
+      releaseDirection(dir);
     };
 
     btn.addEventListener('pointerdown', press);
