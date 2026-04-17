@@ -163,6 +163,9 @@ const STATE = {
 
 const MAX_LIVES = 5;
 const GRASS_SLOW_FACTOR = 0.58;
+const GRID_SIZE = 40;
+const GRID_COLS = canvas.width / GRID_SIZE;
+const GRID_ROWS = canvas.height / GRID_SIZE;
 
 const LEVELS = [
   {
@@ -212,6 +215,12 @@ function createTank(x, y, color, isPlayer = false, overrides = {}) {
     shotCooldown: 0,
     aiShootTimer: 0,
     aiTurnTimer: 0,
+    aiPath: [],
+    aiPathTimer: 0,
+    aiTargetCellKey: '',
+    stuckTimer: 0,
+    aiStepTarget: null,
+    aiStepDir: '',
   };
 }
 
@@ -352,14 +361,27 @@ function loadLevel(levelIndex, initial = false) {
 
 function spawnBoss() {
   const cfg = game.level.boss;
-  const boss = createTank(
-    canvas.width / 2 - 24,
-    30,
-    cfg.color,
-    false,
-    { width: 48, height: 48, speed: cfg.speed, isBoss: true, hp: cfg.hp },
-  );
-  game.enemies.push(boss);
+  const candidates = [
+    { x: 280, y: 30 },
+    { x: 480, y: 30 },
+    { x: 80, y: 30 },
+    { x: 640, y: 30 },
+  ];
+
+  for (const candidate of candidates) {
+    const boss = createTank(
+      candidate.x,
+      candidate.y,
+      cfg.color,
+      false,
+      { width: 40, height: 40, speed: cfg.speed, isBoss: true, hp: cfg.hp },
+    );
+    snapTankToCell(boss);
+    if (!tankBlocked(boss, boss)) {
+      game.enemies.push(boss);
+      return;
+    }
+  }
 }
 
 function syncPanel() {
@@ -418,8 +440,16 @@ function intersects(a, b) {
   return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
 }
 
-function tankBlocked(tank) {
+function tankBlockedByMap(tank) {
   return game.mapBlocks.some((block) => intersects(tank, block));
+}
+
+function tankBlockedByEnemies(tank, ignoreTank = null) {
+  return game.enemies.some((enemy) => enemy !== ignoreTank && intersects(tank, enemy));
+}
+
+function tankBlocked(tank, ignoreTank = null) {
+  return tankBlockedByMap(tank) || tankBlockedByEnemies(tank, ignoreTank);
 }
 
 function tankCenterPoint(tank) {
@@ -454,17 +484,17 @@ function getTankMoveSpeed(tank) {
   return tank.speed * (isTankInGrass(tank) ? GRASS_SLOW_FACTOR : 1);
 }
 
-function moveTankWithCollision(tank, dx, dy) {
+function moveTankWithCollision(tank, dx, dy, ignoreTank = null) {
   const oldX = tank.x;
   const oldY = tank.y;
 
   tank.x += dx;
   clampTank(tank);
-  if (tankBlocked(tank)) tank.x = oldX;
+  if (tankBlocked(tank, ignoreTank)) tank.x = oldX;
 
   tank.y += dy;
   clampTank(tank);
-  if (tankBlocked(tank)) tank.y = oldY;
+  if (tankBlocked(tank, ignoreTank)) tank.y = oldY;
 }
 
 function updatePlayer(dt) {
@@ -498,53 +528,452 @@ function chooseRandomDir() {
   return dirs[Math.floor(Math.random() * dirs.length)];
 }
 
-function chooseEnemyDir(enemy) {
-  if (isTankInGrass(game.player) && !isSameGrassPatch(enemy, game.player)) return chooseRandomDir();
+function shuffleDirections(dirs) {
+  const result = [...dirs];
+  for (let i = result.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+}
 
-  const dx = game.player.x - enemy.x;
-  const dy = game.player.y - enemy.y;
-  const distance = Math.hypot(dx, dy);
-  const chaseRange = enemy.isBoss ? 420 : 280;
+function getDirectionVector(dir) {
+  if (dir === 'up') return { vx: 0, vy: -1 };
+  if (dir === 'down') return { vx: 0, vy: 1 };
+  if (dir === 'left') return { vx: -1, vy: 0 };
+  return { vx: 1, vy: 0 };
+}
 
-  if (distance >= chaseRange) return chooseRandomDir();
+function cellKey(cx, cy) {
+  return `${cx},${cy}`;
+}
 
-  if (Math.abs(dx) > Math.abs(dy)) {
-    return dx > 0 ? 'right' : 'left';
+function pointToCell(x, y) {
+  return {
+    cx: Math.max(0, Math.min(GRID_COLS - 1, Math.floor(x / GRID_SIZE))),
+    cy: Math.max(0, Math.min(GRID_ROWS - 1, Math.floor(y / GRID_SIZE))),
+  };
+}
+
+function tankToCell(tank) {
+  const point = tankCenterPoint(tank);
+  return pointToCell(point.x, point.y);
+}
+
+function getCellAlignedPosition(cx, cy, tank) {
+  return {
+    x: cx * GRID_SIZE + (GRID_SIZE - tank.width) / 2,
+    y: cy * GRID_SIZE + (GRID_SIZE - tank.height) / 2,
+  };
+}
+
+function snapTankToCell(tank) {
+  const point = tankCenterPoint(tank);
+  const cell = pointToCell(point.x, point.y);
+  const aligned = getCellAlignedPosition(cell.cx, cell.cy, tank);
+  tank.x = aligned.x;
+  tank.y = aligned.y;
+}
+
+function isCellWalkable(cx, cy, tank) {
+  if (cx < 0 || cx >= GRID_COLS || cy < 0 || cy >= GRID_ROWS) return false;
+
+  const aligned = getCellAlignedPosition(cx, cy, tank);
+  const probe = {
+    ...tank,
+    x: aligned.x,
+    y: aligned.y,
+  };
+
+  return !tankBlockedByMap(probe);
+}
+
+function getStepDir(fromCell, toCell) {
+  if (toCell.cx > fromCell.cx) return 'right';
+  if (toCell.cx < fromCell.cx) return 'left';
+  if (toCell.cy > fromCell.cy) return 'down';
+  if (toCell.cy < fromCell.cy) return 'up';
+  return '';
+}
+
+function getOrderedNeighborCells(cell, targetCell) {
+  const neighbors = [
+    { cx: cell.cx, cy: cell.cy - 1 },
+    { cx: cell.cx, cy: cell.cy + 1 },
+    { cx: cell.cx - 1, cy: cell.cy },
+    { cx: cell.cx + 1, cy: cell.cy },
+  ];
+
+  return neighbors.sort((a, b) => {
+    const distA = Math.abs(targetCell.cx - a.cx) + Math.abs(targetCell.cy - a.cy);
+    const distB = Math.abs(targetCell.cx - b.cx) + Math.abs(targetCell.cy - b.cy);
+    return distA - distB;
+  });
+}
+
+function getNextCell(cell, dir) {
+  if (dir === 'up') return { cx: cell.cx, cy: cell.cy - 1 };
+  if (dir === 'down') return { cx: cell.cx, cy: cell.cy + 1 };
+  if (dir === 'left') return { cx: cell.cx - 1, cy: cell.cy };
+  return { cx: cell.cx + 1, cy: cell.cy };
+}
+
+function findPathToCell(tank, targetCell) {
+  const startCell = tankToCell(tank);
+  const startKey = cellKey(startCell.cx, startCell.cy);
+  const targetKey = cellKey(targetCell.cx, targetCell.cy);
+
+  if (startKey === targetKey) return [];
+
+  const queue = [startCell];
+  const parents = new Map([[startKey, null]]);
+
+  while (queue.length > 0) {
+    const cell = queue.shift();
+
+    for (const next of getOrderedNeighborCells(cell, targetCell)) {
+      const nextKey = cellKey(next.cx, next.cy);
+      if (parents.has(nextKey) || !isCellWalkable(next.cx, next.cy, tank)) continue;
+
+      parents.set(nextKey, cell);
+      if (nextKey === targetKey) {
+        const path = [next];
+        let current = cell;
+
+        while (current) {
+          path.push(current);
+          current = parents.get(cellKey(current.cx, current.cy));
+        }
+
+        path.reverse();
+        path.shift();
+        return path;
+      }
+
+      queue.push(next);
+    }
   }
 
-  return dy > 0 ? 'down' : 'up';
+  return [];
+}
+
+function canTankAdvance(tank, dir, distance = 12) {
+  const { vx, vy } = getDirectionVector(dir);
+  const probe = {
+    ...tank,
+    x: tank.x + vx * distance,
+    y: tank.y + vy * distance,
+  };
+
+  clampTank(probe);
+  return !tankBlocked(probe, tank);
+}
+
+function getAdvanceableDir(tank, dirs) {
+  for (const dir of dirs) {
+    if (canTankAdvance(tank, dir)) return dir;
+  }
+
+  return dirs[0] || chooseRandomDir();
+}
+
+function getStableMoveDir(tank, intendedDir, alignThreshold = 1.5) {
+  if (!intendedDir) return '';
+
+  const currentCell = tankToCell(tank);
+  const aligned = getCellAlignedPosition(currentCell.cx, currentCell.cy, tank);
+
+  if (intendedDir === 'up' || intendedDir === 'down') {
+    if (Math.abs(tank.x - aligned.x) > alignThreshold) {
+      return tank.x < aligned.x ? 'right' : 'left';
+    }
+  } else if (Math.abs(tank.y - aligned.y) > alignThreshold) {
+    return tank.y < aligned.y ? 'down' : 'up';
+  }
+
+  return intendedDir;
+}
+
+function isTankAtTarget(tank, target, threshold = 1.5) {
+  if (!target) return true;
+  return Math.abs(tank.x - target.x) <= threshold && Math.abs(tank.y - target.y) <= threshold;
+}
+
+function planEnemyStep(enemy, desiredDir) {
+  if (!desiredDir) return null;
+
+  const currentCell = tankToCell(enemy);
+  const stableDir = getStableMoveDir(enemy, desiredDir);
+
+  if (stableDir !== desiredDir) {
+    return {
+      dir: stableDir,
+      target: getCellAlignedPosition(currentCell.cx, currentCell.cy, enemy),
+    };
+  }
+
+  const nextCell = getNextCell(currentCell, desiredDir);
+  if (!isCellWalkable(nextCell.cx, nextCell.cy, enemy)) return null;
+
+  return {
+    dir: desiredDir,
+    target: getCellAlignedPosition(nextCell.cx, nextCell.cy, enemy),
+  };
+}
+
+function moveTankTowardTarget(tank, target, speed, dt, ignoreTank = null) {
+  if (!target) return false;
+
+  const maxStep = speed * dt;
+  const dx = target.x - tank.x;
+  const dy = target.y - tank.y;
+
+  if (Math.abs(dx) > 0.01) {
+    const stepX = Math.abs(dx) <= maxStep ? dx : Math.sign(dx) * maxStep;
+    moveTankWithCollision(tank, stepX, 0, ignoreTank);
+  }
+
+  if (Math.abs(dy) > 0.01) {
+    const stepY = Math.abs(dy) <= maxStep ? dy : Math.sign(dy) * maxStep;
+    moveTankWithCollision(tank, 0, stepY, ignoreTank);
+  }
+
+  if (isTankAtTarget(tank, target)) {
+    tank.x = target.x;
+    tank.y = target.y;
+    return true;
+  }
+
+  return false;
+}
+
+function canEnemySeePlayer(enemy) {
+  return !(isTankInGrass(game.player) && !isSameGrassPatch(enemy, game.player));
+}
+
+function isBlockBetweenPoints(x1, y1, x2, y2) {
+  const minX = Math.min(x1, x2);
+  const maxX = Math.max(x1, x2);
+  const minY = Math.min(y1, y2);
+  const maxY = Math.max(y1, y2);
+
+  return game.mapBlocks.some((block) => {
+    const overlapsX = maxX > block.x && minX < block.x + block.width;
+    const overlapsY = maxY > block.y && minY < block.y + block.height;
+    return overlapsX && overlapsY;
+  });
+}
+
+function getEnemyAttackLane(enemy, alignThreshold = 26) {
+  const enemyCenter = tankCenterPoint(enemy);
+  const playerCenter = tankCenterPoint(game.player);
+  const dx = playerCenter.x - enemyCenter.x;
+  const dy = playerCenter.y - enemyCenter.y;
+
+  if (Math.abs(dx) <= alignThreshold) {
+    const blocked = isBlockBetweenPoints(
+      enemyCenter.x - 2,
+      enemyCenter.y,
+      playerCenter.x + 2,
+      playerCenter.y,
+    );
+    if (!blocked) return { dir: dy > 0 ? 'down' : 'up', clear: true };
+  }
+
+  if (Math.abs(dy) <= alignThreshold) {
+    const blocked = isBlockBetweenPoints(
+      enemyCenter.x,
+      enemyCenter.y - 2,
+      playerCenter.x,
+      playerCenter.y + 2,
+    );
+    if (!blocked) return { dir: dx > 0 ? 'right' : 'left', clear: true };
+  }
+
+  return { dir: '', clear: false };
+}
+
+function getEnemyPreferredDirs(enemy) {
+  const allDirs = ['up', 'down', 'left', 'right'];
+  let preferredDirs = shuffleDirections(allDirs);
+
+  if (canEnemySeePlayer(enemy)) {
+    const dx = game.player.x - enemy.x;
+    const dy = game.player.y - enemy.y;
+    const distance = Math.hypot(dx, dy);
+    const chaseRange = enemy.isBoss ? 420 : 280;
+
+    if (distance < chaseRange) {
+      const primaryDir = Math.abs(dx) > Math.abs(dy)
+        ? dx > 0 ? 'right' : 'left'
+        : dy > 0 ? 'down' : 'up';
+      const secondaryDir = primaryDir === 'left' || primaryDir === 'right'
+        ? dy > 0 ? 'down' : 'up'
+        : dx > 0 ? 'right' : 'left';
+      const remainingDirs = shuffleDirections(
+        allDirs.filter((dir) => dir !== primaryDir && dir !== secondaryDir),
+      );
+
+      preferredDirs = [primaryDir, secondaryDir, ...remainingDirs];
+    }
+  }
+
+  return preferredDirs;
+}
+
+function getEnemyPathDir(enemy) {
+  const currentCell = tankToCell(enemy);
+
+  while (
+    enemy.aiPath.length > 0
+    && enemy.aiPath[0].cx === currentCell.cx
+    && enemy.aiPath[0].cy === currentCell.cy
+  ) {
+    enemy.aiPath.shift();
+  }
+
+  const nextCell = enemy.aiPath[0];
+  if (!nextCell) return '';
+
+  const stepDir = getStepDir(currentCell, nextCell);
+  return getStableMoveDir(enemy, stepDir);
+}
+
+function refreshEnemyPath(enemy, force = false) {
+  const targetCell = tankToCell(game.player);
+  const targetKey = cellKey(targetCell.cx, targetCell.cy);
+
+  if (!force && enemy.aiPathTimer > 0 && enemy.aiTargetCellKey === targetKey && enemy.aiPath.length > 0) {
+    return;
+  }
+
+  enemy.aiPath = findPathToCell(enemy, targetCell);
+  enemy.aiPathTimer = enemy.isBoss ? 0.12 : 0.18;
+  enemy.aiTargetCellKey = targetKey;
+}
+
+function resolveEnemyOverlap(enemy) {
+  if (!tankBlockedByEnemies(enemy, enemy)) return;
+
+  const currentCell = tankToCell(enemy);
+  const candidateCells = [
+    currentCell,
+    ...getOrderedNeighborCells(currentCell, tankToCell(game.player)),
+  ];
+
+  for (const cell of candidateCells) {
+    if (!isCellWalkable(cell.cx, cell.cy, enemy)) continue;
+
+    const aligned = getCellAlignedPosition(cell.cx, cell.cy, enemy);
+    const probe = {
+      ...enemy,
+      x: aligned.x,
+      y: aligned.y,
+    };
+
+    if (!tankBlockedByEnemies(probe, enemy)) {
+      enemy.x = aligned.x;
+      enemy.y = aligned.y;
+      return;
+    }
+  }
+}
+
+function chooseEnemyDir(enemy) {
+  const preferredDirs = getEnemyPreferredDirs(enemy);
+  return getAdvanceableDir(enemy, preferredDirs);
 }
 
 function updateEnemyAI(enemy, dt) {
+  resolveEnemyOverlap(enemy);
+
   enemy.speed = enemy.isBoss ? game.level.boss.speed : game.level.enemySpeed;
   enemy.shotCooldown = Math.max(0, enemy.shotCooldown - dt);
   enemy.aiTurnTimer -= dt;
   enemy.aiShootTimer -= dt;
+  enemy.aiPathTimer -= dt;
+  const hasLockedStep = enemy.aiStepTarget && !isTankAtTarget(enemy, enemy.aiStepTarget);
+  let desiredDir = '';
 
-  if (enemy.aiTurnTimer <= 0) {
-    enemy.dir = chooseEnemyDir(enemy);
-    enemy.aiTurnTimer = enemy.isBoss ? 0.5 + Math.random() * 0.8 : 0.7 + Math.random() * 1.4;
+  if (!hasLockedStep && canEnemySeePlayer(enemy)) {
+    const distance = Math.hypot(game.player.x - enemy.x, game.player.y - enemy.y);
+    const attackLane = getEnemyAttackLane(enemy, 26);
+
+    if (attackLane.clear) {
+      desiredDir = attackLane.dir;
+      enemy.aiTurnTimer = enemy.isBoss ? 0.06 : 0.1;
+      enemy.aiShootTimer = Math.min(enemy.aiShootTimer, enemy.isBoss ? 0.08 : 0.12);
+      enemy.aiPath = [];
+      enemy.aiPathTimer = 0;
+    } else {
+      refreshEnemyPath(enemy, enemy.stuckTimer > 0.08);
+      const pathDir = getEnemyPathDir(enemy);
+
+      if (pathDir) {
+        desiredDir = pathDir;
+        enemy.aiTurnTimer = enemy.isBoss ? 0.08 : 0.12;
+        enemy.aiShootTimer = Math.min(enemy.aiShootTimer, distance < 220 ? 0.18 : 0.28);
+      } else {
+        desiredDir = chooseEnemyDir(enemy);
+      }
+    }
+  } else {
+    enemy.aiPath = [];
+    enemy.aiTargetCellKey = '';
+    desiredDir = chooseEnemyDir(enemy);
   }
 
-  let vx = 0;
-  let vy = 0;
-  if (enemy.dir === 'up') vy = -1;
-  if (enemy.dir === 'down') vy = 1;
-  if (enemy.dir === 'left') vx = -1;
-  if (enemy.dir === 'right') vx = 1;
+  if (!hasLockedStep && (!desiredDir || enemy.aiTurnTimer <= 0)) {
+    desiredDir = chooseEnemyDir(enemy);
+    enemy.aiTurnTimer = enemy.isBoss ? 0.22 + Math.random() * 0.2 : 0.28 + Math.random() * 0.28;
+  }
 
   const moveSpeed = getTankMoveSpeed(enemy);
   const oldX = enemy.x;
   const oldY = enemy.y;
-  moveTankWithCollision(enemy, vx * moveSpeed * dt, vy * moveSpeed * dt);
+
+  if (
+    !enemy.aiStepTarget
+    || isTankAtTarget(enemy, enemy.aiStepTarget)
+    || enemy.stuckTimer > 0.08
+  ) {
+    const stepPlan = planEnemyStep(enemy, desiredDir || enemy.aiStepDir || chooseEnemyDir(enemy))
+      || planEnemyStep(enemy, chooseEnemyDir(enemy));
+    if (stepPlan) {
+      enemy.aiStepDir = stepPlan.dir;
+      enemy.aiStepTarget = stepPlan.target;
+    } else {
+      enemy.aiStepDir = '';
+      enemy.aiStepTarget = null;
+    }
+  }
+
+  if (enemy.aiStepDir) enemy.dir = enemy.aiStepDir;
+  moveTankTowardTarget(enemy, enemy.aiStepTarget, moveSpeed, dt, enemy);
+
   if (enemy.x === oldX && enemy.y === oldY) {
+    enemy.stuckTimer += dt;
+    enemy.aiPath = [];
+    enemy.aiTargetCellKey = '';
+    enemy.aiStepTarget = null;
+    enemy.aiStepDir = '';
     enemy.dir = chooseEnemyDir(enemy);
-    enemy.aiTurnTimer = 0.2;
+    enemy.aiTurnTimer = 0.08;
+    enemy.aiPathTimer = 0;
+  } else {
+    enemy.stuckTimer = 0;
+    if (isTankAtTarget(enemy, enemy.aiStepTarget)) {
+      enemy.aiStepTarget = null;
+    }
   }
 
   if (enemy.aiShootTimer <= 0) {
     fireBullet(enemy);
-    enemy.aiShootTimer = enemy.isBoss ? 0.4 + Math.random() * 0.35 : 0.75 + Math.random() * 1.3;
+    if (canEnemySeePlayer(enemy)) {
+      enemy.aiShootTimer = enemy.isBoss ? 0.2 + Math.random() * 0.18 : 0.32 + Math.random() * 0.28;
+    } else {
+      enemy.aiShootTimer = enemy.isBoss ? 0.35 + Math.random() * 0.25 : 0.55 + Math.random() * 0.55;
+    }
   }
 }
 
@@ -705,9 +1134,13 @@ function spawnEnemyIfNeeded(dt) {
 
   const x = randomEnemySpawnX();
   const enemy = createTank(x, 30, '#ff6b6b', false, { speed: game.level.enemySpeed });
-  if (!tankBlocked(enemy)) {
+  snapTankToCell(enemy);
+  if (!tankBlocked(enemy, enemy)) {
     game.enemies.push(enemy);
     game.spawnRemain -= 1;
+  } else {
+    game.spawnTimer = 0.16;
+    return;
   }
 
   game.spawnTimer = 0.75 + Math.random() * 0.7;
