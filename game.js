@@ -881,7 +881,11 @@ function resolveEnemyOverlap(enemy) {
 
 function chooseEnemyDir(enemy) {
   const preferredDirs = getEnemyPreferredDirs(enemy);
-  return getAdvanceableDir(enemy, preferredDirs);
+  for (const dir of preferredDirs) {
+    if (planEnemyStep(enemy, dir)) return dir;
+  }
+
+  return enemy.aiStepDir || enemy.dir || preferredDirs[0] || chooseRandomDir();
 }
 
 function updateEnemyAI(enemy, dt) {
@@ -895,32 +899,34 @@ function updateEnemyAI(enemy, dt) {
   const hasLockedStep = enemy.aiStepTarget && !isTankAtTarget(enemy, enemy.aiStepTarget);
   let desiredDir = '';
 
-  if (!hasLockedStep && canEnemySeePlayer(enemy)) {
-    const distance = Math.hypot(game.player.x - enemy.x, game.player.y - enemy.y);
-    const attackLane = getEnemyAttackLane(enemy, 26);
+  if (!hasLockedStep) {
+    if (canEnemySeePlayer(enemy)) {
+      const distance = Math.hypot(game.player.x - enemy.x, game.player.y - enemy.y);
+      const attackLane = getEnemyAttackLane(enemy, 26);
 
-    if (attackLane.clear) {
-      desiredDir = attackLane.dir;
-      enemy.aiTurnTimer = enemy.isBoss ? 0.06 : 0.1;
-      enemy.aiShootTimer = Math.min(enemy.aiShootTimer, enemy.isBoss ? 0.08 : 0.12);
-      enemy.aiPath = [];
-      enemy.aiPathTimer = 0;
-    } else {
-      refreshEnemyPath(enemy, enemy.stuckTimer > 0.08);
-      const pathDir = getEnemyPathDir(enemy);
-
-      if (pathDir) {
-        desiredDir = pathDir;
-        enemy.aiTurnTimer = enemy.isBoss ? 0.08 : 0.12;
-        enemy.aiShootTimer = Math.min(enemy.aiShootTimer, distance < 220 ? 0.18 : 0.28);
+      if (attackLane.clear) {
+        desiredDir = attackLane.dir;
+        enemy.aiTurnTimer = enemy.isBoss ? 0.06 : 0.1;
+        enemy.aiShootTimer = Math.min(enemy.aiShootTimer, enemy.isBoss ? 0.08 : 0.12);
+        enemy.aiPath = [];
+        enemy.aiPathTimer = 0;
       } else {
-        desiredDir = chooseEnemyDir(enemy);
+        refreshEnemyPath(enemy, enemy.stuckTimer > 0.08);
+        const pathDir = getEnemyPathDir(enemy);
+
+        if (pathDir) {
+          desiredDir = pathDir;
+          enemy.aiTurnTimer = enemy.isBoss ? 0.08 : 0.12;
+          enemy.aiShootTimer = Math.min(enemy.aiShootTimer, distance < 220 ? 0.18 : 0.28);
+        } else {
+          desiredDir = chooseEnemyDir(enemy);
+        }
       }
+    } else {
+      enemy.aiPath = [];
+      enemy.aiTargetCellKey = '';
+      desiredDir = chooseEnemyDir(enemy);
     }
-  } else {
-    enemy.aiPath = [];
-    enemy.aiTargetCellKey = '';
-    desiredDir = chooseEnemyDir(enemy);
   }
 
   if (!hasLockedStep && (!desiredDir || enemy.aiTurnTimer <= 0)) {
